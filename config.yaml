@@ -22,14 +22,14 @@ dataloader:
   num_workers: 0
   pin_memory: False
   sampler:
-    oversample_factor: 5
+    oversample_factor: 2
     replacement: True
 
 model:
   input_dim: 768
   output_dim: 136
-  num_layers: 6
-  num_heads: 8
+  num_layers: 11
+  num_heads: 16
   ff_dim: 2048
   dropout: 0.1
 
