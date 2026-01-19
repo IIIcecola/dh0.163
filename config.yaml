@@ -1,3 +1,4 @@
+# 实验设置
 exp_name: exp01
 config_name: config01
 
@@ -6,6 +7,7 @@ device: "cuda"
 wav2vec2:
   path: "./wav2vec2-base-960h"
 
+# 数据集配置
 dataset:
   cache_path: "./Dataset"
   datasets_list:
@@ -25,6 +27,7 @@ dataloader:
     oversample_factor: 2
     replacement: True
 
+# 模型配置
 model:
   input_dim: 768
   output_dim: 136
@@ -33,6 +36,7 @@ model:
   ff_dim: 2048
   dropout: 0.1
 
+# 训练配置
 training:
   optimizer:
     lr: 1e-4
@@ -48,13 +52,38 @@ training:
   save_every_n_steps: 2000
   save_path: ${exp_name}/${config_name}
 
+# 保存路径
 save_path: ${exp_name}/${config_name}/transformer_decoder.pth
 
+# evaluation
+evaluation_mode: "inference" # 可选： inference, evaluate, compare
 
+# 公共配置
+visualizer:
+  param_mapping_path: "./ctrl_expressions_map.json"
+  max_params_per_category: 200
+  fps: 25
+  result_name: "audio2face_evaluation"
 
+# 推理模式配置
+model_path: "./path/to/audio2face.pth"
+tester:
+  test_data_dir: "./test"
+  wav_dir: "wav"
+  gt_json_dir: "json"
+  output_dir: "./test_results"
 
+# 结果评估模式配置
+evaluator:
+  pred_dir: "./results/predictions"
+  gt_dir: "./test/json"
+  output_dir: "./result_evaluation"
 
-save_path: "./Weights/transformer_decoder.pth"
-  
-
-
+# 多模型比较配置
+comparison:
+  result_dirs:
+    model_v1: "./results/model_v1"
+    model_v2: "./results/model_v2"
+  gt_dir: "./test/json"
+  output_dir: "./model_comparison"
+  comparison_name: "model_ab_test"
