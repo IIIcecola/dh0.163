@@ -249,6 +249,154 @@ class TemporalSmoothLoss(BaseLoss):
     return {"method": self.method, "weight": self.weight}
 
 
+# Pearson Correlation Loss
+class PearsonCorrelationLoss(BaseLoss):
+    """
+    皮尔逊相关系数损失
+    最大化预测序列和真实序列的线性相关性
+    
+    Config:
+        loss_type: "pearson_correlation"
+        mode: "per_feature" | "per_sequence" | "global"
+            - per_feature: 对每个特征维度单独计算相关性
+            - per_sequence: 对每个序列（时间步）计算相关性  
+            - global: 全局计算相关性
+        reduction: "mean" | "sum" | "none"
+        weight: float 损失权重
+        eps: float 数值稳定性参数
+    """
+    def __init__(self, mode="per_feature", reduction="mean", weight=1.0, eps=1e-8):
+        super().__init__()
+        self.mode = mode
+        self.reduction = reduction
+        self.weight = weight
+        self.eps = eps
+        
+    def forward(self, pred, target):
+        """
+        计算皮尔逊相关系数损失
+        
+        Args:
+            pred: (B, T, D) or (B, T) predictions
+            target: (B, T, D) or (B, T) targets
+            
+        Returns:
+            loss: scalar tensor
+        """
+        # 确保输入形状一致
+        assert pred.shape == target.shape, f"Shapes must match: pred {pred.shape}, target {target.shape}"
+        
+        if self.mode == "per_feature":
+            # 对每个特征维度计算相关性
+            return self._pearson_per_feature(pred, target)
+        elif self.mode == "per_sequence":
+            # 对每个序列计算相关性
+            return self._pearson_per_sequence(pred, target)
+        elif self.mode == "global":
+            # 全局计算相关性
+            return self._pearson_global(pred, target)
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
+    
+    def _compute_pearson(self, x, y):
+        """计算两个张量间的皮尔逊相关系数"""
+        # 展平计算
+        x_flat = x.view(-1)
+        y_flat = y.view(-1)
+        
+        # 计算均值
+        x_mean = torch.mean(x_flat)
+        y_mean = torch.mean(y_flat)
+        
+        # 计算协方差和标准差
+        cov = torch.mean((x_flat - x_mean) * (y_flat - y_mean))
+        x_std = torch.std(x_flat, unbiased=False) + self.eps
+        y_std = torch.std(y_flat, unbiased=False) + self.eps
+        
+        # 计算相关系数
+        pearson = cov / (x_std * y_std)
+        
+        # 使用 1 - pearson 作为损失（最大化相关性）
+        # 或者使用 -pearson（但前者范围在[0, 2]更容易控制）
+        loss = 1.0 - pearson
+        
+        return loss
+    
+    def _pearson_per_feature(self, pred, target):
+        """
+        对每个特征维度分别计算相关性
+        适用于面部参数独立变化的情况
+        """
+        B, T, D = pred.shape
+        losses = []
+        
+        for d in range(D):
+            # 提取第d个特征的所有序列
+            pred_d = pred[:, :, d]  # (B, T)
+            target_d = target[:, :, d]  # (B, T)
+            
+            # 计算该特征维度的相关性损失
+            loss_d = self._compute_pearson(pred_d, target_d)
+            losses.append(loss_d)
+        
+        # 聚合损失
+        losses_tensor = torch.stack(losses)
+        
+        if self.reduction == "mean":
+            total_loss = torch.mean(losses_tensor)
+        elif self.reduction == "sum":
+            total_loss = torch.sum(losses_tensor)
+        else:
+            total_loss = losses_tensor
+        
+        return self.weight * total_loss
+    
+    def _pearson_per_sequence(self, pred, target):
+        """
+        对每个序列（样本）分别计算相关性
+        适用于考虑整体面部表情变化的情况
+        """
+        B, T, D = pred.shape
+        losses = []
+        
+        for b in range(B):
+            # 提取第b个样本的所有特征
+            pred_b = pred[b, :, :]  # (T, D)
+            target_b = target[b, :, :]  # (T, D)
+            
+            # 计算该样本的相关性损失
+            loss_b = self._compute_pearson(pred_b, target_b)
+            losses.append(loss_b)
+        
+        # 聚合损失
+        losses_tensor = torch.stack(losses)
+        
+        if self.reduction == "mean":
+            total_loss = torch.mean(losses_tensor)
+        elif self.reduction == "sum":
+            total_loss = torch.sum(losses_tensor)
+        else:
+            total_loss = losses_tensor
+        
+        return self.weight * total_loss
+    
+    def _pearson_global(self, pred, target):
+        """
+        全局计算相关性
+        最直接的方法，但不考虑特征/序列间的差异
+        """
+        loss = self._compute_pearson(pred, target)
+        return self.weight * loss
+    
+    def get_config(self):
+        return {
+            "mode": self.mode,
+            "reduction": self.reduction,
+            "weight": self.weight,
+            "eps": self.eps
+        }
+
+
 # combinded Loss
 class CombinedLoss(BaseLoss):
   """
@@ -259,19 +407,27 @@ class CombinedLoss(BaseLoss):
 
   每个loss配置：
   {
-    "type": "mse" | "" | "" | ... ,
+    "type":  "mse" | "l1" | "smooth_l1" | "rank_loss_01_range" | 
+                "variance_weighted" | "temporal_smooth" | "pearson_correlation",
     "weight": float, # 该loss权重
     "params": dict # loss特定参数（可选）
   }
   """
-  LOSS_REGISTRY = {
-    "mse": MSELoss,
-    "l1": L1Loss
-  }
+  LOSS_REGISTRY = {}
 
   def __init__(self, losses_config: List[Dict]):
     super().__init__()
-
+    # 初始化注册表（延迟初始化，避免循环引用）
+    if not CombinedLoss.LOSS_REGISTRY:
+        CombinedLoss.LOSS_REGISTRY.update({
+            "mse": MSELoss,
+            "l1": L1Loss,
+            "smooth_l1": SmoothL1Loss,
+            "rank_loss_01_range": RankLoss01Range,
+            "variance_weighted": VarianceWeightedLoss,
+            "temporal_smooth": TemporalSmoothLoss,
+            "pearson_correlation": PearsonCorrelationLoss,  # 新增
+        })
     self.losses_list = []
     self.weights = []
 
