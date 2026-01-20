@@ -69,6 +69,24 @@ class L1Loss(BaseLoss):
   def get_config(self):
     return {"reduction": self.reduction}
 
+class SmoothL1Loss(BaseLoss):
+  """
+  SmoothL1Loss（Huber Loss）
+  Config: 
+    loss_type: "smooth_l1"
+    beta: float (deafult: 1.0)
+  """
+  def __init__(self, beta=1.0):
+    super().__init__()
+    self.beta = beta
+    self.smooth_l1 = nn.SmoothL1Loss(beta=beta, reduction='mean')
+
+  def forward(self, pred, target):
+    return self.smooth_l1(pred, target)
+
+  def get_config(self):
+    return {"beta": self.beta}
+
 class RankLoss01Range(BaseLoss):
   """
   Rank Loss（排序损失）
@@ -118,7 +136,117 @@ class RankLoss01Range(BaseLoss):
     rank_loss = loss_terms.mean()
 
     return rank_loss
-    
+
+# variance weighted loss
+class VarianceWeightedLoss(BaseLoss):
+  """
+  基于方差的加权MSE损失
+  对高方差维度赋予更高权重，使模型更关注变化较大的参数
+  Config:
+    'loss_type': "variance_weighted",
+    'min_weight': 0.1, float 最小权重
+    'max_weight': 10.0, float 最大权重
+    compute_from_data: bool (default: True) 是否从数据计算权重
+    weights_file: str (optional) 从文件加载预计算的权重
+  """
+  def __init__(
+    self,
+    min_weight=0.1,
+    max_weight=10.0,
+    compute_from_data=True,
+    weights_file=None
+  ):
+    super().__init__()
+    self.min_weight=min_weight
+    self.max_weight=max_weight
+    self.compute_from_data=compute_from_data
+    self.weights_file=weights_file
+
+    self.weights = None
+    self.reduction = 'none' # 返回unreduced, 由外部处理
+
+    if weights_file is not None:
+      self._load_weights_from_file(weights_file)
+
+  def _load_weights_from_file(self, weights_file):
+    weights = np.load(weights_file)
+    self.register_buffer('weights', torch.from_numpy(eights).float())
+
+  def set_weights_from_data(self, targets):
+    """
+    Args:
+      targets: (N, T, D) numpy array
+    """
+    dim_var = torch.var(torch.from_numpy(targets).float(), dim=(0, 1)).numpy()
+    weights = np.sqrt(dim_var + 1e-8)
+    weights = np.clip(weights, self.min_weight, self.max_weight)
+    weights = weights / weights.mean()
+    if hasattr(self, 'weights'):
+      delattr(self, 'weights')
+    self.register_buffer('weights', torch.from_numpy(weights.float()))
+
+  def forward(self, pred, target):
+    """
+    计算加权MSE loss
+    Args:
+      pred: (B, T, D) predictions
+      target: (B, T, D) targets
+    Returns:
+      loss: (B, T, D) unreduced weighted squared error
+    """
+    se = (pred - target) ** 2 # (B, T, D)
+    if self.weights is not None:
+      weights = self.weights.to(pred.device)
+      se = se * weights.view(1,1,-1)
+    return se
+
+  def get_config(self):
+    config = {
+      "min_weight": self.min_weight,
+      "max_weight": self.max_weight,
+      "compute_from_data": self.compute_from_data
+    }
+    if self.weights_file is not None:
+      config["weights_file"] = self.weights_file
+    return config
+
+# temporal smoothness loss
+class TemporalSmoothLoss(BaseLoss):
+  """
+  时间平滑损失 - 惩罚相邻帧之间的剧烈变化
+
+  Config:
+    loss_type: "temporal_smooth"
+    method: "diff1" | "diff2"
+    weight: float 损失权重
+  """
+  def __init__(self, method="diff2", weight=1.0):
+    super().__init__()
+    self.method = method
+    self.weight = weight
+
+  def forward(self, pred, target=None):
+    """
+    计算时间平滑损失
+    Args:
+      pred: (B, T, D) predictions
+      target: ignored
+    Returns:
+      loss: scalar tensor
+    """
+    if self.method == "diff1":
+      diff = pred[:, 1:] - pred[:, :-1]
+      loss = torch.mean(diff ** 2)
+    elif self.method == "diff2":
+      diff = pred[:, 2:] - 2 * pred[:, 1:-1] + pred[:, :-2]
+      loss = torch.mean(diff ** 2)
+    else:
+      raise ValueError()
+    return self.weight * loss
+
+  def get_config(self):
+    return {"method": self.method, "weight": self.weight}
+
 
 # combinded Loss
 class CombinedLoss(BaseLoss):
@@ -200,7 +328,63 @@ class CombinedLoss(BaseLoss):
       config["losses"].append(loss_config)
     return config
 
+# Loss Factory
+class LossFactory:
+  """
+  从config创建Loss实例
+  Config格式：
+    # 单个loss
+    {
+      'loss_type': "variance_weighted",
+      'min_weight': 0.1,
+      'max_weight': 10.0
+    }
+    # 组合loss
+    {
+      'loss_type': "combined",
+      'losses': [
+        {"type": "variance_weighted", "weight": 1.0},
+        {"type": "temporal_smooth", "weight": 0.1}
+      ]
+    }
+  """
+  @staticmethod
+  def create_from_config(loss_config: Dict) -> BaseLoss:
+    """
+    从config字典创建loss实例
+    Args:
+      loss_config: loss配置字典
 
+    Returns:
+      loss: loss实例
+    """
+    loss_type = loss_config.get("loss_type", "mse")
+    if loss_type == "combinde":
+      return CombinedLoss(loss_config["losses"])
+    elif loss_type in CombinedLoss.LOSS_REGISTRY:
+      loss_class = CombinedLoss.LOSS_REGISTRY[loss_type]
+      params = {k: v for k, v in loss_config.items() if k != "loss_type"}
+      return loss_class(**params)
+    else:
+      raise ValueError()
+  
+    @staticmethod
+    def create_from_yaml(config_file: str) -> BaseLoss:
+      """
+      从yaml文件创建loss
+
+      Args:
+        config_file: yaml配置文件路径
+
+      Returns:
+        loss: loss实例
+      """
+      from omegaconf import OmegaConf
+      loss_config = OmegaConf.load(config_file)
+      return LossFactory.creat_from_config(loss_config)
+
+
+    
 
 
 
