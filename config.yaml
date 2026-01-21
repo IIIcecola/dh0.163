@@ -27,6 +27,20 @@ dataloader:
     oversample_factor: 2
     replacement: True
 
+loss:
+  # 单个loss
+  # - loss_type: mse
+  # 组合loss
+  loss_type: combined
+  losses:
+    - type: mse
+      weight: 1.0
+    - type: pearson_correlation
+      weight: 0.4
+      params:
+        mode: per_feature
+  
+
 # 模型配置
 model:
   input_dim: 768
